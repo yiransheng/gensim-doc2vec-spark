@@ -29,7 +29,7 @@ class DistDoc2VecFast:
         self.num_iterations = num_iterations
         self.num_partitions = num_partitions
 
-    def build_vocab_from_rdd(self, corpus, reset_hidden=True):
+    def build_vocab_from_rdd(self, corpus):
         '''
         Build model vocab from RDD, respect model's min_count, max_vocab_size
         if reset_hidden sets to True (default), reset syn1neg weights
@@ -100,10 +100,13 @@ class DistDoc2VecFast:
         doctag_locks = corpus.map(lambda x: np.ones(dtype=REAL, shape=(len(x), ))).cache()
 
         bc_model = sc.broadcast(model)
+        trained_count = sc.accumulator(0)
+        train_passes = sc.accumulator(0)
 
         def mapPartitions(iterable):
             model = bc_model.value
             doctag_syn0_part, sentences, lockf, k = iter(iterable).next()
+            train_passes.add(1)
             for i, sent in enumerate(sentences):
                 # training document modify doctag_syn0_part in-place
                 train_document_dbow(model, sent.words,
@@ -114,12 +117,13 @@ class DistDoc2VecFast:
                                     learn_words=False,
                                     train_words=False,
                                     learn_hidden=False)
+            trained_count.add(i+1)
             return [doctag_syn0_part]
 
         def simplify(k, doctag, corpus, locks):
-            dataset = doctag.zip(corpus).zip(locks) \
+            dset = doctag.zip(corpus).zip(locks) \
                 .map(lambda (pair, lockf): (pair[0], pair[1], lockf, k)) 
-            return dataset
+            return dset
 
         def reducer(zipped, k):
             new_doctag_syn0 = zipped.mapPartitions(mapPartitions)
@@ -127,11 +131,13 @@ class DistDoc2VecFast:
             return new_zipped
 
         dataset = simplify(0, doctag_syn0, corpus, doctag_locks) 
-        final_dataset = reduce(reducer, xrange(self.num_partitions), dataset) 
+        final_dataset = reduce(reducer, xrange(self.num_iterations), dataset) 
         
         self.doctag_syn0 = final_dataset.map(lambda (docvecs,s,lk,k): docvecs).cache() 
         # kick start training
         self.doctag_syn0.count()
+        print "**** Train passes: %d ****" % train_passes.value
+        print "**** Train counts: %d ****" % trained_count.value
         corpus.unpersist()
         doctag_locks.unpersist()
         bc_model.unpersist()
