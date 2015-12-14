@@ -1,10 +1,3 @@
----
-title: "Gensim Doc2Vec on Spark"
-author: "Yiran Sheng"
-date: "12/13/2015"
-output: html_document
----
-
 # Gensim Doc2Vec on Spark
 
 ## Overview
