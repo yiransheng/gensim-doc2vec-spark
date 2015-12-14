@@ -25,6 +25,11 @@ The goal of `Doc2Vec` is to learn vector representation of _each_ document in tr
 
 `gensim` is used as a basis for this setup, training for sentence vectors are adapted to work on `RDD`s. 
 
+## TO-DOs
+
+1. using `gensim`'s internal procedures from `gensim.models.word2vec_inner` and `gensim.models.doc2vec_inner` to train document vectors 
+2. implement hierarchical sampling 
+
 ## Algorithum
 
 `PV-DBOW` [(paper)](https://cs.stanford.edu/~quocle/paragraph_vector.pdf) works very similarly to Skip Gram model in `word2vec` models. The model is forced to predict random word sampled from a sentence/document. 

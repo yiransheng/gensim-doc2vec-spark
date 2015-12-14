@@ -74,9 +74,16 @@ if (window.hljs && document.readyState && document.readyState === "complete") {
 <p>The goal of <code>Doc2Vec</code> is to learn vector representation of <em>each</em> document in training set. For example, a dataset of 10 million documents and vector size 300, requires 300,000,000 floating number parameters (or a 300x1000,000 array). Fortunately, each data point (a.ka. sentence or document) only updates its corresponding row in the weights matrix during training process, therefore, it’s possible to parallelize the model by zipping its parameters with training dataset: each partition only holds the parameters relevant to its own share of data.</p>
 <p><code>gensim</code> is used as a basis for this setup, training for sentence vectors are adapted to work on <code>RDD</code>s.</p>
 </div>
+<div id="to-dos" class="section level2">
+<h2>TO-DOs</h2>
+<ol style="list-style-type: decimal">
+<li>using <code>gensim</code>’s internal procedures from <code>gensim.models.word2vec_inner</code> and <code>gensim.models.doc2vec_inner</code> to train document vectors</li>
+<li>implement hierarchical sampling</li>
+</ol>
+</div>
 <div id="algorithum" class="section level2">
 <h2>Algorithum</h2>
-<p><code>PV-DBOW</code> <a href="https://cs.stanford.edu/~quocle/paragraph_vector.pdf">(paper)</a> works very similarly to Skip Gram model in <code>word2vec</code> models. The model is forced to predice random word sampled from a sentence/document.</p>
+<p><code>PV-DBOW</code> <a href="https://cs.stanford.edu/~quocle/paragraph_vector.pdf">(paper)</a> works very similarly to Skip Gram model in <code>word2vec</code> models. The model is forced to predict random word sampled from a sentence/document.</p>
 <blockquote>
 <p>… at each iteration of stochastic gradient descent, we sample a text window, then sample a random word from the text window and form a classifi-cation task given the Paragraph Vector.</p>
 </blockquote>
