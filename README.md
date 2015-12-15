@@ -2,8 +2,7 @@
 
 ## Overview
 
-Implements a prototype for running `gensim` `Doc2Vec` on Spark. Training for document vectors are pure python (with numpy) as of now, which is 20x-80x slower than `gensim`'s optimized C version. Therefore, running this is less likely to be faster than running `gensim` on a single node. Only `PV-DBOW` with negative sampling is implemented, and works best with a pre-trained `Word2Vec` model using `hs=0` and `negative>0` settings (skip-gram, negative sampling), so we don't need to learn the weights on hidden layer (`learn-hidden=False`).
-
+Implements a prototype for running `gensim` `Doc2Vec` on Spark. Only `PV-DBOW` with negative sampling is implemented.
 This work is inspired by:
 
 https://github.com/dirkneumann/deepdist
@@ -18,110 +17,35 @@ The goal of `Doc2Vec` is to learn vector representation of _each_ document in tr
 
 `gensim` is used as a basis for this setup, training for sentence vectors are adapted to work on `RDD`s. 
 
-## TO-DOs
+## Details
 
-1. using `gensim`'s internal procedures from `gensim.models.word2vec_inner` and `gensim.models.doc2vec_inner` to train document vectors 
-2. implement hierarchical sampling 
+When training `Doc2Vec` in `PV-DBOW` model and using negative sampling, three `numpy` arrays are of interests in `gensim`, the fully captures the model state:
 
-## Algorithum
+1. `model.syn0`
+2. `model.syn1neg`
+3. `model.docvecs.doctag_syn0`
 
-`PV-DBOW` [(paper)](https://cs.stanford.edu/~quocle/paragraph_vector.pdf) works very similarly to Skip Gram model in `word2vec` models. The model is forced to predict random word sampled from a sentence/document. 
+In our implementation, we keep `syn0` and `syn1neg` centralized, as they are of limited size (size of total vocabulary). `doctag_syn0` is held as RDD (each partition holds a single `numpy` array for it). `Word2Vec` model is broadcasted to all partitions. 
 
-> ... at each iteration of stochastic gradient descent, we sample a text window, then sample a random word from the text window and form a classifi-cation task given the Paragraph Vector.
+In each training iteration, the following happens:
 
-Using negative sampling, instead of training softmax classifier, we train a simple logistic regression model. For example, giving a sentence with id `SENT_0` and context window size of 1:
+1. On each partition, `Cython` and `BLAS` powered procedure `train_document_dbow` from `gensim.models.doc2vec_inner` is called, and trains word vectors, document vector and hidden layer weights jointly
+2. We record triplet (`syn0` deltas, `syn1neg` deltas, `doctag_syn0`) and produce a new RDD with each partition holding a single triplet; and this new RDD is cached (as it will be used twice)
+3. We aggregate all deltas through Spark's `RDD.aggregate` api, to sum all deltas, then apply deltas to `model` object in driver program
+4. Previous generation of model broadcased is unpersisted, new model is broadcasted to all executors (runs actual training as `aggregate` is a Spark action)
+5. Create new inputs from new RDD in step 4, training will not be re-run as we have cached results, then we invalid stale triplet RDD from previous iteration
 
-```
-the quick brown fox jumped over the lazy dog
-```
+By tweaking `num_partitions` and `num_iterations`, we can balance the trade-off between accuracy, speed and network overhead. 
 
-We have context, target pairs of:
+## Test Results
 
-```
-([the, brown], quick), ([quick, fox], brown), ([brown, jumped], fox), ...
-```
-
-And training sampels of:
-
-```
-(quick, the), (quick, brown), (brown, quick), (brown, fox), ...
-```
-
-The goal of negative sampling PV-DBOW model is to maximize the objective function, where "quick" is the target word, and "sheep" is a randomly sampled noisy word:
-
-J(θ) = log<sub>θ</sub>[D=1|SENT_0, the] + log<sub>θ</sub>[D=0|SENT_0, sheep]
-
-(This is similar to word2vec model, which maximizes: J(θ) = log<sub>θ</sub>[D=1|quick,the] + log<sub>θ</sub>[D=0|quick,sheep], the target word is replaced with sentence id `SENT_0`, this makes it possible to reuse hidden->output weights obtained from word2vec model training).
-
-The implementation in `gensim` for skip-gram, negative sampling can be found in function [`train_sg_pair`](https://github.com/piskvorky/gensim/blob/develop/gensim/models/word2vec.py#L223), which is reused in `Doc2Vec` python implementation as well. 
-
-When training a single sentence, first, it's vector form is looked up (from `model.docvecs.doctag_syn0`) using id `SENT_0`, dot multiplied with vectors for word "the" and "sheep" looked up from the hidden->output layer weights (`model.syn1neg`), then fed into the logsistic function to produce an output between 0.0 and 1.0 (feed forward). The second step is to propagate error back to the input-> hidden layer (or just update the document vector with error gradient). 
-
-Training on a sentence will _only_ update its own vector representation (the row corresponds to its id in input-> hidden weights matrix), if we freeze the learning of hidden->output layer (`numpy` array `model.syn1neg`). 
-
-## Moving on to a cluster
-
-In `gensim`, document vectors are stored as `model.docvecs.doctag_syn0`, which is a `numpy` memmapped array (so that it does not blow up memory for large training dataset). This makes it impractical to broadcast the models to workers when running on Spark, as we'd have to copy the backing array (on disk) to multiple nodes. 
-
-Assuming we have a already trained `gensim` `Word2Vec` model, we broadcast it to all workers, so that we can access helper functions on the model object anywhere. 
-
-The first step is to parallelize this potentially very big numpy array. For a training set in RDD form of N documents and p partitions, we create a single `doctag_syn0` numpy array on each partition through `mapPartitions` operation. Subsequent training is performed on the RDD produced by zipping training set and this parameter RDD (RDD[numpy.array]). 
-
-Training happens on each partition, for each iteration, the `numpy` array holder each partition's `doctags_syn0`is updated in place using a custom training function (a series of `numpy` array operations). Resulting parameters is collected as a new RDD through `mapPartitions`. 
-
-## Usage
-
-Main class `DistDoc2Vec`. Constructed by:
+Cornell Movie Reviews [Dataset](http://www.cs.cornell.edu/people/pabo/movie-review-data/) is used to test the approach out. Model is trained on 5 partitions and 20 iterations, and we were able to classify movie reviews labels with about **11%** error rate only from docvectors, with balanced false negative and postive rate: 
 
 ```
-DistDoc2Vec(model=model, # gensim word2vec model
-            alpha=0.025, # learning rate
-            learn_hidden=False, # update syn1neg or not
-            num_iterations=10,   # number of training iterations
-            num_partitions=None  # number of partitions for RDD, if None will use input RDD's settings)
-```
-
-Build vocab from RDD:
-
-```
-build_vocab_from_rdd(rdd)
-
-# rdd is a RDD of sentences, a sentence is a list of tokens/words
-```
-
-Training on Spark:
-
-```
-train_sentences_cbow(rdd)
-
-# Rdd is a RDD of TaggedDocument (gensim) objects 
+*** Error Rate: 0.107995 ***
+*** False Positive Rate: 0.107799 ***
+*** False Negative Rate: 0.108191 ***
 ```
 
 
-## Example
-
-```
-from gensim.models.word2vec import Word2Vec
-from gensim.models.doc2vec import TaggedDocument
-from ddoc2vec import DistDoc2Vec
-
-# sents is a RDD of sentences (array of tokens)
-
-model = Word2Vec(size=100, hs=0, negative=8)  
-dd2v = DistDoc2Vec(model, learn_hidden=False, num_partitions=5, num_iterations=10)
-dd2v.build_vocab_from_rdd(sents, reset_hidden=False)
-# train word2vec in driver
-model.train(sents.collect())
-dd2v.train_sentences_cbow(sents.zipWithIndex().map(lambda (s, i): TaggedDocument(words=s, tags=[i])))
-```
-
-Running `test.py` (on movie review data found [here](http://www.cs.cornell.edu/people/pabo/movie-review-data/)):
-
-```
-$SPARK_HOME/bin/spark-submit --verbose \
-   --master yarn \
-   --deploy-mode client \
-   --py-files ddoc2vec.py \
-   ./test.py
-```
 
