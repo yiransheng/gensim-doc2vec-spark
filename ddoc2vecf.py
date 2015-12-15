@@ -52,9 +52,9 @@ class DistDoc2VecFast:
         model.total_words = long(len(model.vocab))
 
     def saveAsPickleFile(self, path):
-        syn0_path = "%s.syn0" % path 
-        syn1neg_path = "%s.syn1neg" % path 
-        doctagsyn0_path = "%s.doctag_syn0" % path 
+        syn0_path = "%s.syn0" % path
+        syn1neg_path = "%s.syn1neg" % path
+        doctagsyn0_path = "%s.doctag_syn0" % path
         self.doctag_syn0.saveAsPickleFile(doctagsyn0_path)
         sc = self.doctag_syn0.context
         sc.parallelize(self.model.syn0, 1).saveAsPickleFile(syn0_path)
@@ -63,14 +63,11 @@ class DistDoc2VecFast:
     def train_sentences_cbow(self, corpus):
         '''
         Faster version, uses gensim's Cython training procedure
-        But cannot learn weights for hidden layer (syn1neg)
-        Therefore, requires a already trained Word2Vec model 
-        (negative sampling, skip-gram settings)
         '''
         model = self.model
         alpha = self.alpha
         vector_size = model.vector_size
- 
+
         if self.num_partitions:
             corpus = corpus.repartition(self.num_partitions)
         def make_sent_doctag(sent):
@@ -86,7 +83,7 @@ class DistDoc2VecFast:
             '''
             Merge 1d arrays into 2d array on each partition
             '''
-            a = np.concatenate(list(iterable), axis=0) 
+            a = np.concatenate(list(iterable), axis=0)
             return [np.reshape(a, (-1, vector_size))]
 
         # RDD of init doc vectors
@@ -153,11 +150,11 @@ class DistDoc2VecFast:
 
         def simplify(k, params, corpus, locks):
             dset = params.zip(corpus).zip(locks) \
-                .map(lambda (pair, lockf): (pair[0], pair[1], lockf, k)) 
+                .map(lambda (pair, lockf): (pair[0], pair[1], lockf, k))
             return dset
 
         for k in xrange(self.num_iterations):
-            dataset = simplify(k, params, corpus, doctag_locks) 
+            dataset = simplify(k, params, corpus, doctag_locks)
             old_params = params
             params = dataset.mapPartitions(mapPartitions).cache()
             dsyn0, dsyn1neg = params.aggregate((None, None), seq_op, comb_op)
@@ -173,7 +170,7 @@ class DistDoc2VecFast:
         bc_syn1neg_0.unpersist()
 
         self.doctag_syn0 = params.map(lambda (_a, _b, dvecs): dvecs)
-            
+
         # kick start training
         self.doctag_syn0.count()
         print "**** Train passes: %d ****" % train_passes.value
@@ -182,11 +179,11 @@ class DistDoc2VecFast:
         doctag_locks.unpersist()
         bc_model.unpersist()
 
-            
 
 
-            
 
-        
+
+
+
 
 
