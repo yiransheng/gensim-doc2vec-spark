@@ -39,7 +39,7 @@ By tweaking `num_partitions` and `num_iterations`, we can balance the trade-off 
 
 ## Test Results
 
-Cornell Movie Reviews [Dataset](http://www.cs.cornell.edu/people/pabo/movie-review-data/) is used to test the approach out. Model is trained on 5 partitions and 20 iterations, and we were able to classify movie reviews labels with about **11%** error rate only from docvectors, with balanced false negative and postive rate: 
+Cornell Movie Reviews [Dataset](http://www.cs.cornell.edu/people/pabo/movie-review-data/) is used to test the approach out. Model is trained on 5 partitions and 20 iterations, and we were able to classify movie reviews labels with about **11%** error rate only from docvectors, with balanced false negative and postie rate: 
 
 ```
 *** Error Rate: 0.107995 ***
@@ -47,5 +47,30 @@ Cornell Movie Reviews [Dataset](http://www.cs.cornell.edu/people/pabo/movie-revi
 *** False Negative Rate: 0.108191 ***
 ```
 
+## Note in downloading data
+
+The following shell script downloads movie review data and uploads it to HDFS
+
+```
+wget http://www.cs.cornell.edu/people/pabo/movie-review-data/review_polarity.tar.gz
+tar xzvf review_polarity.tar.gz
+cd txt_sentoken/
+cat pos/*.txt > positive.txt
+cat neg/*.txt > negative.txt
+hadoop fs -mkdir -p /movie_review/positive
+hadoop fs -mkdir -p /movie_review/negative
+hadoop fs -put positive.txt /movie_review/positive/
+hadoop fs -put negative.txt /movie_review/negative/
+```
+
+The following command submits testing script `moview_review.py`
+
+```
+$SPARK_HOME/bin/spark-submit --verbose \
+  --master yarn    
+  --deploy-mode client 
+  --py-files ddoc2vecf.py
+  movie_review.py
+```
 
 
