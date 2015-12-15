@@ -93,6 +93,7 @@ class DistDoc2VecFast:
         doctag_syn0 = corpus.map(make_sent_doctag) \
                             .mapPartitions(concat_docvecs)
 
+
         n_part = corpus.getNumPartitions()
         sc = corpus.context
 
@@ -100,12 +101,24 @@ class DistDoc2VecFast:
         doctag_locks = corpus.map(lambda x: np.ones(dtype=REAL, shape=(len(x), ))).cache()
 
         bc_model = sc.broadcast(model)
+
+        syn0_zeros = np.zeros(np.shape(model.syn0), dtype=REAL)
+        syn1neg_zeros = np.zeros(np.shape(model.syn1neg), dtype=REAL)
+
+        bc_syn0_0 = sc.broadcast(syn0_zeros)
+        bc_syn1neg_0 = sc.broadcast(syn1neg_zeros)
+        # params is a RDD of tripplelet (delta syn0, delta syn1neg, doctag_syn0 np array)
+        params = doctag_syn0.map(lambda d: (bc_syn0_0.value, bc_syn1neg_0.value, d)).cache()
+
         trained_count = sc.accumulator(0)
         train_passes = sc.accumulator(0)
 
         def mapPartitions(iterable):
             model = bc_model.value
-            doctag_syn0_part, sentences, lockf, k = iter(iterable).next()
+            syn0copy = model.syn0.copy()
+            syn1negcopy = model.syn1neg.copy()
+            params, sentences, lockf, k = iter(iterable).next()
+            _a, _b, doctag_syn0_part = params
             train_passes.add(1)
             for i, sent in enumerate(sentences):
                 # training document modify doctag_syn0_part in-place
@@ -114,26 +127,53 @@ class DistDoc2VecFast:
                                     alpha=alpha * 1.0 / sqrt(k+1),
                                     doctag_vectors=doctag_syn0_part,
                                     doctag_locks=lockf,
-                                    learn_words=False,
-                                    train_words=False,
-                                    learn_hidden=False)
+                                    learn_words=True,
+                                    train_words=True,
+                                    learn_hidden=True)
             trained_count.add(i+1)
-            return [doctag_syn0_part]
 
-        def simplify(k, doctag, corpus, locks):
-            dset = doctag.zip(corpus).zip(locks) \
+            dsyn0 = model.syn0 - syn0copy
+            dsyn1neg = model.syn1neg - syn1negcopy
+
+            return [(dsyn0, dsyn1neg, doctag_syn0_part)]
+
+        def seq_op(a, b):
+            return (b[0], b[1])
+
+        def comb_op(delta_pairs, next_deltas):
+            csyn0, csyn1neg = delta_pairs
+            if csyn0 is None:
+                csyn0 = bc_syn0_0.value
+            if csyn1neg is None:
+                csyn1neg = bc_syn1neg_0.value
+            dsyn0, dsyn1neg = next_deltas
+            csyn0 += dsyn0
+            csyn1neg += dsyn1neg
+            return csyn0, csyn1neg
+
+        def simplify(k, params, corpus, locks):
+            dset = params.zip(corpus).zip(locks) \
                 .map(lambda (pair, lockf): (pair[0], pair[1], lockf, k)) 
             return dset
 
-        def reducer(zipped, k):
-            new_doctag_syn0 = zipped.mapPartitions(mapPartitions)
-            new_zipped = simplify(k, new_doctag_syn0, corpus, doctag_locks) 
-            return new_zipped
+        for k in xrange(self.num_iterations):
+            dataset = simplify(k, params, corpus, doctag_locks) 
+            old_params = params
+            params = dataset.mapPartitions(mapPartitions).cache()
+            dsyn0, dsyn1neg = params.aggregate((None, None), seq_op, comb_op)
+            bc_model.unpersist()
+            model.syn0 += (dsyn0 / n_part)
+            model.syn1neg += (dsyn1neg / n_part)
+            bc_model = sc.broadcast(model)
+            old_params.unpersist()
 
-        dataset = simplify(0, doctag_syn0, corpus, doctag_locks) 
-        final_dataset = reduce(reducer, xrange(self.num_iterations), dataset) 
-        
-        self.doctag_syn0 = final_dataset.map(lambda (docvecs,s,lk,k): docvecs).cache() 
+        corpus.unpersist()
+        doctag_locks.unpersist()
+        bc_syn0_0.unpersist()
+        bc_syn1neg_0.unpersist()
+
+        self.doctag_syn0 = params.map(lambda (_a, _b, dvecs): dvecs)
+            
         # kick start training
         self.doctag_syn0.count()
         print "**** Train passes: %d ****" % train_passes.value
