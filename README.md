@@ -47,7 +47,7 @@ Cornell Movie Reviews [Dataset](http://www.cs.cornell.edu/people/pabo/movie-revi
 *** False Negative Rate: 0.108191 ***
 ```
 
-## Note in downloading data
+## Running Test
 
 The following shell script downloads movie review data and uploads it to HDFS
 
