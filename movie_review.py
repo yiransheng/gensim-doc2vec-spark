@@ -6,10 +6,10 @@ from pyspark.sql import SQLContext
 
 from pyspark.mllib.classification import LogisticRegressionWithLBFGS, LogisticRegressionModel
 from pyspark.mllib.regression import LabeledPoint
- 
+
 import numpy as np
 import re
-from ddoc2vef2 import DistDoc2VecFast
+from ddoc2vecf import DistDoc2VecFast
 
 
 def swap_kv(tp):
@@ -23,7 +23,7 @@ singles = re.compile(r'(\s\S\s)', re.I|re.U)
 # separators (any whitespace)
 seps = re.compile(r'\s+')
 
-def clean(text): 
+def clean(text):
     text = text.lower()
     text = contractions.sub('', text)
     text = symbols.sub(r' \1 ', text)
@@ -40,7 +40,7 @@ def parse_sentences(rdd):
 
     raw = rdd.zipWithIndex().map(swap_kv)
 
-    data = raw.flatMap(lambda (id, text): [(id, clean(s).split()) for s in sentences(text)]) 
+    data = raw.flatMap(lambda (id, text): [(id, clean(s).split()) for s in sentences(text)])
     return data
 
 def parse_paragraphs(rdd):
@@ -53,7 +53,7 @@ def parse_paragraphs(rdd):
 
         return paragraph
 
-    data = raw.map(lambda (id, text): TaggedDocument(words=clean_paragraph(text), tags=[id])) 
+    data = raw.map(lambda (id, text): TaggedDocument(words=clean_paragraph(text), tags=[id]))
     return data
 
 def word2vec(rdd):
@@ -69,14 +69,14 @@ def word2vec(rdd):
     return dd2v, sentences
 
 def doc2vec(dd2v, rdd):
-    paragraphs = parse_paragraphs(rdd)    
+    paragraphs = parse_paragraphs(rdd)
     dd2v.train_sentences_cbow(paragraphs)
     print "**** Done Training Doc2Vec ****"
     def split_vec(iterable):
         dvecs = iter(iterable).next()
         n = np.shape(dvecs)[0]
         return (dvecs[i] for i in xrange(n))
-    return dd2v, dd2v.doctag_syn0.mapPartitions(split_vec) 
+    return dd2v, dd2v.doctag_syn0.mapPartitions(split_vec)
 
 def regression(reg_data):
     (trainingData, testData) = reg_data.randomSplit([0.7, 0.3])
@@ -110,4 +110,4 @@ if __name__ == "__main__":
     reg_data = docvecs.zipWithIndex().map(lambda (v, i): LabeledPoint(1.0 if i<npos else 0.0, v))
     regression(reg_data)
 
-    
+
