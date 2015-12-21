@@ -52,44 +52,45 @@ class DistDoc2VecFast:
         model.total_words = long(len(model.vocab))
 
     def saveAsPickleFile(self, path):
-        syn0_path = "%s.syn0" % path
-        syn1neg_path = "%s.syn1neg" % path
-        doctagsyn0_path = "%s.doctag_syn0" % path
+        syn0_path = "%s.syn0" % path 
+        syn1neg_path = "%s.syn1neg" % path 
+        doctagsyn0_path = "%s.doctag_syn0" % path 
         self.doctag_syn0.saveAsPickleFile(doctagsyn0_path)
         sc = self.doctag_syn0.context
         sc.parallelize(self.model.syn0, 1).saveAsPickleFile(syn0_path)
         sc.parallelize(self.model.syn1neg, 1).saveAsPickleFile(syn1neg_path)
 
+    def init_doc_sims(self, corpus):
+        model = self.model
+        def make_sent_doctag(docs):
+            tag2index, docvecs = {}, []
+            for d in docs:
+                tag = d.tags[0]
+                sent = d.words
+                if tag in tag2index:
+                    i = tag2index[tag]
+                else:
+                    i = len(docvecs) 
+                    seed = "%d %s" % (model.seed, tag)
+                    docvec = model.seeded_vector(seed).astype(REAL)
+                    tag2index[tag] = i
+                    docvecs.append(docvec)
+            return [{ 'lookup': tag2index, 'doctag_syn0': array(docvecs) }]
+        return corpus.mapPartitions(make_sent_doctag)
+      
     def train_sentences_cbow(self, corpus):
         '''
         Faster version, uses gensim's Cython training procedure
+        (negative sampling, skip-gram settings)
         '''
         model = self.model
         alpha = self.alpha
         vector_size = model.vector_size
-
+ 
         if self.num_partitions:
             corpus = corpus.repartition(self.num_partitions)
-        def make_sent_doctag(sent):
-            # for now support only single-tag docuemnt/sentence
-            tag = iter(sent.tags).next()
-            seed = "%d %s" % (model.seed, tag)
-            # a single row correspoinding to Doc2Vec's doctag_syn0
-            # distributed as RDD  (1xvector_size)
-            docvec = model.seeded_vector(seed).astype(REAL)
-            return docvec
-
-        def concat_docvecs(iterable):
-            '''
-            Merge 1d arrays into 2d array on each partition
-            '''
-            a = np.concatenate(list(iterable), axis=0)
-            return [np.reshape(a, (-1, vector_size))]
-
         # RDD of init doc vectors
-        doctag_syn0 = corpus.map(make_sent_doctag) \
-                            .mapPartitions(concat_docvecs)
-
+        doctag_syn0 = self.init_doc_sims(corpus) 
 
         n_part = corpus.getNumPartitions()
         sc = corpus.context
@@ -115,9 +116,12 @@ class DistDoc2VecFast:
             syn0copy = model.syn0.copy()
             syn1negcopy = model.syn1neg.copy()
             params, sentences, lockf, k = iter(iterable).next()
-            _a, _b, doctag_syn0_part = params
+            _a, _b, docvecs = params
+            lookup = docvecs['lookup']
+            doctag_syn0_part = docvecs['doctag_syn0']
             train_passes.add(1)
-            for i, sent in enumerate(sentences):
+            for sent in sentences:
+                i = lookup[sent.tags[0]]
                 # training document modify doctag_syn0_part in-place
                 train_document_dbow(model, sent.words,
                                     doctag_indexes=[i],
@@ -132,7 +136,7 @@ class DistDoc2VecFast:
             dsyn0 = model.syn0 - syn0copy
             dsyn1neg = model.syn1neg - syn1negcopy
 
-            return [(dsyn0, dsyn1neg, doctag_syn0_part)]
+            return [(dsyn0, dsyn1neg, docvecs)]
 
         def seq_op(a, b):
             return (b[0], b[1])
@@ -150,11 +154,11 @@ class DistDoc2VecFast:
 
         def simplify(k, params, corpus, locks):
             dset = params.zip(corpus).zip(locks) \
-                .map(lambda (pair, lockf): (pair[0], pair[1], lockf, k))
+                .map(lambda (pair, lockf): (pair[0], pair[1], lockf, k)) 
             return dset
 
         for k in xrange(self.num_iterations):
-            dataset = simplify(k, params, corpus, doctag_locks)
+            dataset = simplify(k, params, corpus, doctag_locks) 
             old_params = params
             params = dataset.mapPartitions(mapPartitions).cache()
             dsyn0, dsyn1neg = params.aggregate((None, None), seq_op, comb_op)
@@ -170,7 +174,7 @@ class DistDoc2VecFast:
         bc_syn1neg_0.unpersist()
 
         self.doctag_syn0 = params.map(lambda (_a, _b, dvecs): dvecs)
-
+            
         # kick start training
         self.doctag_syn0.count()
         print "**** Train passes: %d ****" % train_passes.value
@@ -179,11 +183,70 @@ class DistDoc2VecFast:
         doctag_locks.unpersist()
         bc_model.unpersist()
 
+    def train_sentences_only_cbow(self, corpus):
+        '''
+        Faster version, uses gensim's Cython training procedure
+        But cannot learn weights for hidden layer (syn1neg)
+        Therefore, requires a already trained Word2Vec model 
+        (negative sampling, skip-gram settings)
+        '''
+        model = self.model
+        alpha = self.alpha
+        vector_size = model.vector_size
+ 
+        if self.num_partitions:
+            corpus = corpus.repartition(self.num_partitions)
 
+        doctag_syn0 = self.init_doc_sims(corpus) 
 
+        n_part = corpus.getNumPartitions()
+        sc = corpus.context
 
+        corpus = corpus.glom().cache()
+        doctag_locks = corpus.map(lambda x: np.ones(dtype=REAL, shape=(len(x), ))).cache()
 
+        bc_model = sc.broadcast(model)
 
+        trained_count = sc.accumulator(0)
+        train_passes = sc.accumulator(0)
 
+        def mapPartitions(iterable):
+            model = bc_model.value
+            docvecs, sentences, lockf, k = iter(iterable).next()
+            lookup = docvecs['lookup']
+            doctag_syn0_part = docvecs['doctag_syn0']
+            train_passes.add(1)
+            for sent in sentences:
+                i = lookup[sent.tags[0]]
+                # training document modify doctag_syn0_part in-place
+                train_document_dbow(model, sent.words,
+                                    doctag_indexes=[i],
+                                    alpha=alpha * 1.0 / sqrt(k+1),
+                                    doctag_vectors=doctag_syn0_part,
+                                    doctag_locks=lockf,
+                                    learn_words=False,
+                                    train_words=False,
+                                    learn_hidden=False)
+            trained_count.add(i+1)
 
+            return [docvecs]
 
+        def simplify(k, doctag_syn0, corpus, locks):
+            dset = doctag_syn0.zip(corpus).zip(locks) \
+                .map(lambda (pair, lockf): (pair[0], pair[1], lockf, k)) 
+            return dset
+
+        def reducer(dataset, k):
+            new_doctag = dataset.mapPartitions(mapPartitions)
+            return simplify(k, new_doctag, corpus, doctag_locks) 
+
+        init_dataset = simplify(0, doctag_syn0, corpus, doctag_locks)
+        dataset = reduce(reducer, xrange(1, self.num_iterations), init_dataset)
+
+        self.doctag_syn0 = dataset.map(lambda (docvecs, _1, _2, _3): docvecs) 
+
+    def train(self, corpus):
+        if self.learn_words and self.learn_hidden:
+            return self.train_sentences_cbow(corpus)
+        else:
+            return self.train_sentences_only_cbow(corpus)
